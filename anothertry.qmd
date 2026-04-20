@@ -1,0 +1,1109 @@
+```{python}
+import pandas as pd
+import numpy as np
+from pulp import *
+
+# Target values and traits where lower is better
+TARGET_VALUES = {
+    'PROS': 118, 'CED': 14, 'BW': -3, 'WW': 65, 'YW': 100, 'ADG': 0.28,
+    'DMI': 0.6, 'Milk': 29, 'ME': -2, 'HPG': 12, 'CEM': 8,
+    'STAY': 18, 'Marb': 0.5, 'YG': 0.03, 'CW': 29, 'REA': 0.17,
+    'FAT': 0, 'HB': 70, 'GM': 46
+}
+LOWER_IS_BETTER = ['BW', 'ME', 'DMI', 'YG', 'FAT']
+
+# Define the traits we want to evaluate
+TRAITS = list(TARGET_VALUES.keys())
+
+def parse_breeding_data(file_path):
+    """Read breeding data from file"""
+    try:
+        # First, try reading the file to inspect its format
+        with open(file_path, 'r') as f:
+            first_few_lines = [next(f) for _ in range(5)]
+        
+        print("Sample of first few lines from the file:")
+        for line in first_few_lines:
+            print(line.strip())
+        
+        # Try to detect if the file is CSV or space-delimited
+        if ',' in first_few_lines[0]:
+            print("Detected CSV format")
+            df = pd.read_csv(file_path)
+        else:
+            print("Detected space-delimited format")
+            # Use the headers you provided
+            columns = ['RAAA#', 'Sex', 'AnimalID', 'Name', 'DOB', 'BrdCds'] + TRAITS
+            df = pd.read_csv(file_path, sep='\s+', names=columns)
+        
+        print("Column names in the dataframe:", df.columns.tolist())
+        
+        # Check if AnimalID column exists
+        if 'AnimalID' not in df.columns:
+            raise ValueError("AnimalID column not found in the data")
+        
+        # Check what type of data is in AnimalID
+        print(f"AnimalID column type: {df['AnimalID'].dtype}")
+        print("First few AnimalID values:", df['AnimalID'].head().tolist())
+        
+        # Safer way to split the AnimalID
+        df['Cow'] = df['AnimalID'].astype(str).str.split('-').str[0].str.strip()
+        df['Bull'] = df['AnimalID'].astype(str).str.split('-').str[1].str.strip()
+        
+        # Convert numeric traits to float
+        for trait in TRAITS:
+            if trait in df.columns:
+                df[trait] = pd.to_numeric(df[trait], errors='coerce')
+            else:
+                print(f"Warning: Trait {trait} not found in columns")
+        
+        return df
+    
+    except Exception as e:
+        print(f"Error parsing data: {e}")
+        # Let's try a more flexible approach if the standard approach fails
+        try:
+            print("Trying alternative parsing method...")
+            # Just read the raw data and figure out the format
+            df = pd.read_csv(file_path, sep=None, engine='python')
+            
+            print("Columns found:", df.columns.tolist())
+            
+            # Try to find the column containing the cow-bull information
+            cow_bull_col = None
+            for col in df.columns:
+                if df[col].astype(str).str.contains('-').any():
+                    cow_bull_col = col
+                    print(f"Found column with cow-bull pairs: {col}")
+                    break
+            
+            if cow_bull_col:
+                df['AnimalID'] = df[cow_bull_col]
+                df['Cow'] = df['AnimalID'].astype(str).str.split('-').str[0].str.strip()
+                df['Bull'] = df['AnimalID'].astype(str).str.split('-').str[1].str.strip()
+            
+            # Try to map the traits
+            trait_columns = {}
+            for trait in TRAITS:
+                for col in df.columns:
+                    if trait.lower() in col.lower():
+                        trait_columns[trait] = col
+                        break
+            
+            print("Mapped trait columns:", trait_columns)
+            
+            # Create a new dataframe with the correct traits
+            result_df = pd.DataFrame()
+            result_df['Cow'] = df['Cow']
+            result_df['Bull'] = df['Bull']
+            
+            for trait, col in trait_columns.items():
+                result_df[trait] = pd.to_numeric(df[col], errors='coerce')
+            
+            return result_df
+        
+        except Exception as e2:
+            print(f"Alternative parsing also failed: {e2}")
+            raise
+
+def score_pairing(row):
+    """Calculate how many traits meet target requirements"""
+    score = 0
+    traits_met = []
+    
+    for trait in TRAITS:
+        if trait not in row.index:
+            continue
+        
+        if pd.isna(row[trait]):
+            continue
+            
+        if trait in LOWER_IS_BETTER:
+            # For traits where lower is better
+            if row[trait] <= TARGET_VALUES[trait]:
+                score += 1
+                traits_met.append(trait)
+        else:
+            # For traits where higher is better
+            if row[trait] >= TARGET_VALUES[trait]:
+                score += 1
+                traits_met.append(trait)
+    
+    return score, traits_met
+
+def optimize_breeding_batch(df, batch_cows):
+    """Use linear programming to optimize breeding assignments for a batch of cows"""
+    # Filter data for only this batch of cows
+    batch_df = df[df['Cow'].isin(batch_cows)]
+    
+    # Get unique bulls
+    bulls = batch_df['Bull'].unique()
+    
+    print(f"Optimizing batch with {len(batch_cows)} cows and {len(bulls)} bulls")
+    
+    # Calculate scores for each pairing
+    scores = {}
+    traits_met_dict = {}
+    
+    for _, row in batch_df.iterrows():
+        cow = row['Cow']
+        bull = row['Bull']
+        score, traits_met = score_pairing(row)
+        scores[(cow, bull)] = score
+        traits_met_dict[(cow, bull)] = traits_met
+    
+    # Create the optimization model
+    model = LpProblem("Cattle_Breeding_Optimization_Batch", LpMaximize)
+    
+    # Create a binary variable for each possible pairing
+    pairings = {}
+    for cow in batch_cows:
+        for bull in bulls:
+            if (cow, bull) in scores:
+                pairings[(cow, bull)] = LpVariable(f"Pair_{cow}_{bull}", cat='Binary')
+    
+    # Objective function: maximize total score
+    model += lpSum([pairings[(cow, bull)] * scores[(cow, bull)] for cow, bull in pairings.keys()])
+    
+    # Constraint: each cow must be assigned exactly once
+    for cow in batch_cows:
+        cow_bulls = [bull for bull in bulls if (cow, bull) in pairings]
+        if cow_bulls:  # Only add constraint if this cow has possible bulls
+            model += lpSum([pairings[(cow, bull)] for bull in cow_bulls]) == 1
+    
+    # Constraint: each bull can be assigned to at most 1/5 of the cows in this batch
+    max_cows_per_bull = max(1, len(batch_cows) // 5)
+    print(f"Each bull can be assigned to at most {max_cows_per_bull} cows in this batch")
+    
+    for bull in bulls:
+        bull_cows = [cow for cow in batch_cows if (cow, bull) in pairings]
+        if bull_cows:  # Only add constraint if this bull has possible cows
+            model += lpSum([pairings[(cow, bull)] for cow in bull_cows]) <= max_cows_per_bull
+    
+    # Solve the model
+    print("Solving optimization model for this batch...")
+    model.solve(PULP_CBC_CMD(msg=False))
+    
+    # Extract the results
+    optimal_pairings = []
+    for cow, bull in pairings.keys():
+        if pairings[(cow, bull)].value() == 1:
+            # Find the row with this pairing
+            matching_rows = batch_df[(batch_df['Cow'] == cow) & (batch_df['Bull'] == bull)]
+            if not matching_rows.empty:
+                row = matching_rows.iloc[0]
+                trait_values = {}
+                for trait in TRAITS:
+                    if trait in row.index:
+                        trait_values[trait] = row[trait]
+                
+                optimal_pairings.append({
+                    'Cow': cow,
+                    'Bull': bull,
+                    'Score': scores[(cow, bull)],
+                    'Traits': trait_values,
+                    'Traits_Met': traits_met_dict[(cow, bull)],
+                    'Batch': current_batch  # Add batch number for tracking
+                })
+    
+    return optimal_pairings
+
+def generate_report(all_optimal_pairings, status):
+    """Generate a comprehensive report of the optimization results"""
+    if len(all_optimal_pairings) == 0:
+        return "No optimal pairings found."
+    
+    # Sort pairings by batch and then by score (highest first)
+    all_optimal_pairings.sort(key=lambda x: (x.get('Batch', 0), -x['Score']))
+    
+    # Count bulls and their assignments
+    bull_counts = {}
+    for pairing in all_optimal_pairings:
+        bull = pairing['Bull']
+        if bull not in bull_counts:
+            bull_counts[bull] = 0
+        bull_counts[bull] += 1
+    
+    # Generate report
+    report = "OPTIMAL BREEDING ASSIGNMENTS (BATCH METHOD)\n"
+    report += "=" * 80 + "\n\n"
+    
+    report += "SUMMARY:\n"
+    report += f"Total cows: {len(all_optimal_pairings)}\n"
+    report += f"Total bulls used: {len(bull_counts)}\n"
+    report += f"Average traits meeting target per pairing: {sum(p['Score'] for p in all_optimal_pairings) / len(all_optimal_pairings):.2f}\n\n"
+    
+    # Report by batch
+    batch_stats = {}
+    for pairing in all_optimal_pairings:
+        batch = pairing.get('Batch', 0)
+        if batch not in batch_stats:
+            batch_stats[batch] = {'count': 0, 'total_score': 0}
+        batch_stats[batch]['count'] += 1
+        batch_stats[batch]['total_score'] += pairing['Score']
+    
+    report += "BATCH STATISTICS:\n"
+    for batch, stats in sorted(batch_stats.items()):
+        avg_score = stats['total_score'] / stats['count'] if stats['count'] > 0 else 0
+        report += f"Batch {batch}: {stats['count']} cows, Avg score: {avg_score:.2f}\n"
+    report += "\n"
+    
+    report += "BULL ASSIGNMENTS:\n"
+    for bull, count in bull_counts.items():
+        report += f"Bull {bull}: {count} cows\n"
+    report += "\n"
+    
+    report += "DETAILED PAIRINGS:\n"
+    report += f"{'Batch':<6} {'Cow':<10} {'Bull':<10} {'Score':<5} {'Traits Meeting Target':<50}\n"
+    report += "-" * 80 + "\n"
+    
+    for pairing in all_optimal_pairings:
+        batch = pairing.get('Batch', 0)
+        cow = pairing['Cow']
+        bull = pairing['Bull']
+        score = pairing['Score']
+        traits_met = pairing['Traits_Met']
+        
+        report += f"{batch:<6} {cow:<10} {bull:<10} {score:<5} {', '.join(traits_met)[:50]}\n"
+    
+    return report
+
+def create_csv_output(all_optimal_pairings, original_df):
+    """Create a CSV file with all the optimal pairings and their trait values"""
+    # Create a dictionary for the CSV output
+    output_data = []
+    
+    for pairing in all_optimal_pairings:
+        cow = pairing['Cow']
+        bull = pairing['Bull']
+        score = pairing['Score']
+        traits_met = pairing['Traits_Met']
+        batch = pairing.get('Batch', 0)
+        
+        # Get the original row data
+        row_data = original_df[(original_df['Cow'] == cow) & (original_df['Bull'] == bull)]
+        
+        if not row_data.empty:
+            row = row_data.iloc[0]
+            
+            # Create a dictionary for this pairing
+            pairing_dict = {
+                'Batch': batch,
+                'Cow': cow,
+                'Bull': bull,
+                'Score': score,
+                'Traits_Met': ','.join(traits_met)
+            }
+            
+            # Add all trait values
+            for trait in TRAITS:
+                if trait in row.index:
+                    pairing_dict[trait] = row[trait]
+                    # Add a column indicating if this trait meets the target
+                    if trait in traits_met:
+                        pairing_dict[f"{trait}_Meets_Target"] = "Yes"
+                    else:
+                        pairing_dict[f"{trait}_Meets_Target"] = "No"
+            
+            output_data.append(pairing_dict)
+    
+    # Create the dataframe and save to CSV
+    output_df = pd.DataFrame(output_data)
+    return output_df
+
+def main(file_path):
+    """Main function to run the optimization in batches"""
+    print(f"Reading data from {file_path}...")
+    df = parse_breeding_data(file_path)
+    
+    # Check if we have the necessary columns
+    required_cols = ['Cow', 'Bull']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    print(f"Parsed {len(df)} potential pairings involving {len(df['Cow'].unique())} cows and {len(df['Bull'].unique())} bulls.")
+    
+    # Get all unique cows
+    all_cows = list(df['Cow'].unique())
+    total_cows = len(all_cows)
+    
+    # Calculate batch size (1/5 of total cows)
+    batch_size = 5
+    
+    print(f"Total cows: {total_cows}")
+    print(f"Batch size: {batch_size}")
+    print(f"Will process in {min(5, total_cows)} batches")
+    
+    # Store all optimal pairings across batches
+    all_optimal_pairings = []
+    
+    # Track assigned cows
+    assigned_cows = set()
+    
+    # Process in batches
+    global current_batch
+    current_batch = 1
+    remaining_cows = all_cows.copy()
+    
+    while remaining_cows and current_batch:
+        print(f"\nProcessing batch {current_batch}...")
+        
+        # Select cows for this batch
+        batch_cows = remaining_cows[:batch_size]
+        print(f"Selected {len(batch_cows)} cows for this batch")
+        
+        # Optimize this batch
+        batch_optimal_pairings = optimize_breeding_batch(df, batch_cows)
+        
+        # Add to overall results
+        all_optimal_pairings.extend(batch_optimal_pairings)
+        
+        # Update assigned cows
+        newly_assigned = {pairing['Cow'] for pairing in batch_optimal_pairings}
+        assigned_cows.update(newly_assigned)
+        
+        # Remove assigned cows from remaining cows
+        remaining_cows = [cow for cow in remaining_cows if cow not in assigned_cows]
+        
+        print(f"Batch {current_batch} complete. Assigned {len(newly_assigned)} cows.")
+        print(f"Total assigned so far: {len(assigned_cows)} of {total_cows} cows")
+        
+        # Move to next batch
+        current_batch += 1
+    
+    print("\nAll batches processed.")
+    
+    # Check if any cows were not assigned
+    unassigned_cows = set(all_cows) - assigned_cows
+    if unassigned_cows:
+        print(f"Warning: {len(unassigned_cows)} cows could not be assigned")
+    
+    print("Generating report...")
+    report = generate_report(all_optimal_pairings, "Optimal")
+    
+    # Save report to file
+    text_output_file = "optimal_breeding_report_batched.txt"
+    with open(text_output_file, 'w') as f:
+        f.write(report)
+    
+    # Create and save CSV output
+    csv_output_df = create_csv_output(all_optimal_pairings, df)
+    csv_output_file = "optimal_breeding_results_batched.csv"
+    csv_output_df.to_csv(csv_output_file, index=False)
+    
+    print(f"Text report saved to {text_output_file}")
+    print(f"CSV results saved to {csv_output_file}")
+    print("\nSUMMARY:")
+    print(f"Total optimal pairings: {len(all_optimal_pairings)}")
+    if all_optimal_pairings:
+        print(f"Average traits meeting target: {sum(p['Score'] for p in all_optimal_pairings) / len(all_optimal_pairings):.2f}")
+    
+    return all_optimal_pairings
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+    else:
+        file_path = input("Enter the path to the breeding data file: ")
+
+
+```
+
+```{python}
+import pandas as pd
+import numpy as np
+from pulp import *
+
+# Target values and traits where lower is better
+TARGET_VALUES = {
+    'PROS': 118, 'CED': 14, 'BW': -3, 'WW': 65, 'YW': 100, 'ADG': 0.28,
+    'DMI': 0.6, 'Milk': 29, 'ME': -2, 'HPG': 12, 'CEM': 8,
+    'STAY': 18, 'Marb': 0.5, 'YG': 0.03, 'CW': 29, 'REA': 0.17,
+    'FAT': 0, 'HB': 70, 'GM': 46
+}
+LOWER_IS_BETTER = ['BW', 'ME', 'DMI', 'YG', 'FAT']
+
+# Define the traits we want to evaluate
+TRAITS = list(TARGET_VALUES.keys())
+
+# Define priority traits with weights for multi-objective optimization
+PRIORITY_WEIGHTS = {
+    'CED': 0.1,   # Maximize
+    'Milk': 0.1,  # Maximize
+    'Marb': 0.1,  # Maximize
+    'ME': -0.1    # Minimize (negative weight means we want to minimize)
+}
+
+# Main weight for the primary objective (number of traits meeting target)
+TRAITS_MET_WEIGHT = 1.0
+
+# Special constraints
+RESTRICTED_BULL = "8269"  # Bull ID that's limited to 10 matings
+MAX_MATINGS_FOR_RESTRICTED_BULL = 10
+
+# Priority cows - these will be processed in specific order
+PRIORITY_COWS = ["1278J", "9191G"]  # Cows to be processed first, in this order
+
+def parse_breeding_data(file_path):
+    """Read breeding data from file"""
+    try:
+        # First, try reading the file to inspect its format
+        with open(file_path, 'r') as f:
+            first_few_lines = [next(f) for _ in range(5)]
+        
+        print("Sample of first few lines from the file:")
+        for line in first_few_lines:
+            print(line.strip())
+        
+        # Try to detect if the file is CSV or space-delimited
+        if ',' in first_few_lines[0]:
+            print("Detected CSV format")
+            df = pd.read_csv(file_path)
+        else:
+            print("Detected space-delimited format")
+            # Use the headers you provided
+            columns = ['RAAA#', 'Sex', 'AnimalID', 'Name', 'DOB', 'BrdCds'] + TRAITS
+            df = pd.read_csv(file_path, sep='\s+', names=columns)
+        
+        print("Column names in the dataframe:", df.columns.tolist())
+        
+        # Check if AnimalID column exists
+        if 'AnimalID' not in df.columns:
+            raise ValueError("AnimalID column not found in the data")
+        
+        # Check what type of data is in AnimalID
+        print(f"AnimalID column type: {df['AnimalID'].dtype}")
+        print("First few AnimalID values:", df['AnimalID'].head().tolist())
+        
+        # Safer way to split the AnimalID
+        df['Cow'] = df['AnimalID'].astype(str).str.split('-').str[0].str.strip()
+        df['Bull'] = df['AnimalID'].astype(str).str.split('-').str[1].str.strip()
+        
+        # Convert numeric traits to float
+        for trait in TRAITS:
+            if trait in df.columns:
+                df[trait] = pd.to_numeric(df[trait], errors='coerce')
+            else:
+                print(f"Warning: Trait {trait} not found in columns")
+        
+        return df
+    
+    except Exception as e:
+        print(f"Error parsing data: {e}")
+        # Let's try a more flexible approach if the standard approach fails
+        try:
+            print("Trying alternative parsing method...")
+            # Just read the raw data and figure out the format
+            df = pd.read_csv(file_path, sep=None, engine='python')
+            
+            print("Columns found:", df.columns.tolist())
+            
+            # Try to find the column containing the cow-bull information
+            cow_bull_col = None
+            for col in df.columns:
+                if df[col].astype(str).str.contains('-').any():
+                    cow_bull_col = col
+                    print(f"Found column with cow-bull pairs: {col}")
+                    break
+            
+            if cow_bull_col:
+                df['AnimalID'] = df[cow_bull_col]
+                df['Cow'] = df['AnimalID'].astype(str).str.split('-').str[0].str.strip()
+                df['Bull'] = df['AnimalID'].astype(str).str.split('-').str[1].str.strip()
+            
+            # Try to map the traits
+            trait_columns = {}
+            for trait in TRAITS:
+                for col in df.columns:
+                    if trait.lower() in col.lower():
+                        trait_columns[trait] = col
+                        break
+            
+            print("Mapped trait columns:", trait_columns)
+            
+            # Create a new dataframe with the correct traits
+            result_df = pd.DataFrame()
+            result_df['Cow'] = df['Cow']
+            result_df['Bull'] = df['Bull']
+            
+            for trait, col in trait_columns.items():
+                result_df[trait] = pd.to_numeric(df[col], errors='coerce')
+            
+            return result_df
+        
+        except Exception as e2:
+            print(f"Alternative parsing also failed: {e2}")
+            raise
+
+def score_pairing(row):
+    """Calculate how many traits meet target requirements"""
+    score = 0
+    traits_met = []
+    
+    for trait in TRAITS:
+        if trait not in row.index:
+            continue
+        
+        if pd.isna(row[trait]):
+            continue
+            
+        if trait in LOWER_IS_BETTER:
+            # For traits where lower is better
+            if row[trait] <= TARGET_VALUES[trait]:
+                score += 1
+                traits_met.append(trait)
+        else:
+            # For traits where higher is better
+            if row[trait] >= TARGET_VALUES[trait]:
+                score += 1
+                traits_met.append(trait)
+    
+    return score, traits_met
+
+def optimize_specific_cow(df, cow, restricted_bull_count, all_bull_counts):
+    """Optimize for a specific priority cow"""
+    print(f"Optimizing specifically for cow {cow}...")
+    
+    # Filter data for this cow
+    cow_df = df[df['Cow'] == cow]
+    
+    if cow_df.empty:
+        print(f"Warning: No data found for cow {cow}")
+        return None, restricted_bull_count
+    
+    # Calculate scores and priority trait values for each pairing
+    pairings_data = []
+    
+    for _, row in cow_df.iterrows():
+        bull = row['Bull']
+        score, traits_met = score_pairing(row)
+        
+        # Calculate priority trait scores
+        priority_score = 0
+        priority_values = {}
+        
+        for trait, weight in PRIORITY_WEIGHTS.items():
+            if trait in row.index and not pd.isna(row[trait]):
+                priority_values[trait] = row[trait]
+                priority_score += weight * row[trait]
+            else:
+                priority_values[trait] = 0
+        
+        # Adjust score if this is the restricted bull and we've reached the limit
+        if bull == RESTRICTED_BULL and restricted_bull_count >= MAX_MATINGS_FOR_RESTRICTED_BULL:
+            # Heavily penalize using this bull beyond its limit
+            total_score = -1000
+        else:
+            # Combined score (primary + secondary objectives)
+            total_score = TRAITS_MET_WEIGHT * score + priority_score
+        
+        pairings_data.append({
+            'Cow': cow,
+            'Bull': bull,
+            'Score': score,
+            'Traits_Met': traits_met,
+            'Priority_Score': priority_score,
+            'Total_Score': total_score,
+            'Row': row,
+            'Priority_Trait_Values': priority_values
+        })
+    
+    # Sort by total score (highest first)
+    pairings_data.sort(key=lambda x: x['Total_Score'], reverse=True)
+    
+    # Select the best pairing
+    if pairings_data:
+        best_pairing = pairings_data[0]
+        bull = best_pairing['Bull']
+        
+        # Update bull counts
+        if bull == RESTRICTED_BULL:
+            restricted_bull_count += 1
+        if bull not in all_bull_counts:
+            all_bull_counts[bull] = 0
+        all_bull_counts[bull] += 1
+        
+        # Prepare the output format
+        row = best_pairing['Row']
+        trait_values = {}
+        for trait in TRAITS:
+            if trait in row.index:
+                trait_values[trait] = row[trait]
+        
+        optimal_pairing = {
+            'Cow': cow,
+            'Bull': bull,
+            'Score': best_pairing['Score'],
+            'Traits': trait_values,
+            'Traits_Met': best_pairing['Traits_Met'],
+            'Batch': 'Priority',  # Mark as priority cow
+            'Priority_Trait_Values': best_pairing['Priority_Trait_Values']
+        }
+        
+        print(f"Selected bull {bull} for cow {cow} with score {best_pairing['Score']}")
+        return optimal_pairing, restricted_bull_count
+    else:
+        print(f"Warning: No valid pairings found for cow {cow}")
+        return None, restricted_bull_count
+
+def optimize_breeding_batch(df, batch_cows, restricted_bull_count, all_bull_counts):
+    """Use linear programming to optimize breeding assignments for a batch of cows with multiple objectives"""
+    # Filter data for only this batch of cows
+    batch_df = df[df['Cow'].isin(batch_cows)]
+    
+    # Get unique bulls
+    bulls = batch_df['Bull'].unique()
+    
+    print(f"Optimizing batch with {len(batch_cows)} cows and {len(bulls)} bulls")
+    print(f"Current restricted bull ({RESTRICTED_BULL}) count: {restricted_bull_count}/{MAX_MATINGS_FOR_RESTRICTED_BULL}")
+    
+    # Calculate scores and priority trait values for each pairing
+    scores = {}
+    traits_met_dict = {}
+    priority_values = {}
+    
+    for _, row in batch_df.iterrows():
+        cow = row['Cow']
+        bull = row['Bull']
+        score, traits_met = score_pairing(row)
+        scores[(cow, bull)] = score
+        traits_met_dict[(cow, bull)] = traits_met
+        
+        # Store values for priority traits
+        priority_values[(cow, bull)] = {}
+        for trait, weight in PRIORITY_WEIGHTS.items():
+            if trait in row.index and not pd.isna(row[trait]):
+                priority_values[(cow, bull)][trait] = row[trait]
+            else:
+                # Use a default value if the trait is missing
+                priority_values[(cow, bull)][trait] = 0
+    
+    # Create the optimization model
+    model = LpProblem("Multi_Objective_Breeding_Optimization_Batch", LpMaximize)
+    
+    # Create a binary variable for each possible pairing
+    pairings = {}
+    for cow in batch_cows:
+        for bull in bulls:
+            if (cow, bull) in scores:
+                pairings[(cow, bull)] = LpVariable(f"Pair_{cow}_{bull}", cat='Binary')
+    
+    # Objective function: 
+    # 1. Primary: maximize total traits meeting target (with weight TRAITS_MET_WEIGHT)
+    # 2. Secondary: optimize priority traits with their respective weights
+    objective = lpSum([
+        # Primary objective - maximize traits meeting target
+        TRAITS_MET_WEIGHT * pairings[(cow, bull)] * scores[(cow, bull)] +
+        # Secondary objectives - priority traits
+        lpSum([
+            PRIORITY_WEIGHTS[trait] * pairings[(cow, bull)] * priority_values[(cow, bull)][trait]
+            for trait in PRIORITY_WEIGHTS.keys() 
+            if (cow, bull) in pairings
+        ])
+        for cow, bull in pairings.keys()
+    ])
+    
+    model += objective
+    
+    # Constraint: each cow must be assigned exactly once
+    for cow in batch_cows:
+        cow_bulls = [bull for bull in bulls if (cow, bull) in pairings]
+        if cow_bulls:  # Only add constraint if this cow has possible bulls
+            model += lpSum([pairings[(cow, bull)] for bull in cow_bulls]) == 1
+    
+    # Constraint: each bull can be assigned to at most 1/5 of the cows in this batch
+    max_cows_per_bull = max(1, len(batch_cows) // 5)
+    print(f"Each bull can be assigned to at most {max_cows_per_bull} cows in this batch")
+    
+    for bull in bulls:
+        bull_cows = [cow for cow in batch_cows if (cow, bull) in pairings]
+        if bull_cows:  # Only add constraint if this bull has possible cows
+            # Check if this is our restricted bull
+            if bull == RESTRICTED_BULL:
+                # Calculate how many more assignments this bull can have
+                remaining_slots = max(0, MAX_MATINGS_FOR_RESTRICTED_BULL - restricted_bull_count)
+                max_for_this_bull = min(max_cows_per_bull, remaining_slots)
+            else:
+                max_for_this_bull = max_cows_per_bull
+                
+            # Apply the constraint
+            model += lpSum([pairings[(cow, bull)] for cow in bull_cows]) <= max_for_this_bull
+    
+    # Solve the model
+    print("Solving multi-objective optimization model for this batch...")
+    model.solve(PULP_CBC_CMD(msg=False))
+    
+    # Extract the results
+    optimal_pairings = []
+    
+    # Track how many additional assignments for the restricted bull
+    new_restricted_bull_count = 0
+    
+    for cow, bull in pairings.keys():
+        if pairings[(cow, bull)].value() == 1:
+            # Update bull counts
+            if bull == RESTRICTED_BULL:
+                new_restricted_bull_count += 1
+            if bull not in all_bull_counts:
+                all_bull_counts[bull] = 0
+            all_bull_counts[bull] += 1
+            
+            # Find the row with this pairing
+            matching_rows = batch_df[(batch_df['Cow'] == cow) & (batch_df['Bull'] == bull)]
+            if not matching_rows.empty:
+                row = matching_rows.iloc[0]
+                trait_values = {}
+                for trait in TRAITS:
+                    if trait in row.index:
+                        trait_values[trait] = row[trait]
+                
+                # Calculate priority trait scores for reporting
+                priority_trait_scores = {}
+                for trait in PRIORITY_WEIGHTS:
+                    if trait in row.index and not pd.isna(row[trait]):
+                        priority_trait_scores[trait] = row[trait]
+                
+                optimal_pairings.append({
+                    'Cow': cow,
+                    'Bull': bull,
+                    'Score': scores[(cow, bull)],
+                    'Traits': trait_values,
+                    'Traits_Met': traits_met_dict[(cow, bull)],
+                    'Batch': current_batch,  # Add batch number for tracking
+                    'Priority_Trait_Values': priority_trait_scores
+                })
+    
+    # Update the restricted bull count
+    restricted_bull_count += new_restricted_bull_count
+    
+    print(f"Used restricted bull {RESTRICTED_BULL} {new_restricted_bull_count} times in this batch")
+    print(f"Total usage of restricted bull so far: {restricted_bull_count}/{MAX_MATINGS_FOR_RESTRICTED_BULL}")
+    
+    return optimal_pairings, restricted_bull_count
+
+def generate_report(all_optimal_pairings, status, all_bull_counts):
+    """Generate a comprehensive report of the optimization results"""
+    if len(all_optimal_pairings) == 0:
+        return "No optimal pairings found."
+    
+    # Sort pairings: priority cows first, then by batch and score
+    def sorting_key(pairing):
+        # Check if it's a priority cow
+        if pairing['Cow'] in PRIORITY_COWS:
+            # Give priority cows a special batch number and sort by their order in PRIORITY_COWS
+            return (-1, PRIORITY_COWS.index(pairing['Cow']), -pairing['Score'])
+        else:
+            # For regular cows, sort by batch and then by score
+            return (pairing.get('Batch', 0), 0, -pairing['Score'])
+    
+    all_optimal_pairings.sort(key=sorting_key)
+    
+    # Generate report
+    report = "MULTI-OBJECTIVE BREEDING OPTIMIZATION WITH CUSTOM CONSTRAINTS\n"
+    report += "=" * 80 + "\n\n"
+    
+    report += "SPECIAL CONSTRAINTS:\n"
+    report += f"- Bull {RESTRICTED_BULL} limited to maximum {MAX_MATINGS_FOR_RESTRICTED_BULL} matings\n"
+    report += f"- Priority cows processed first: {', '.join(PRIORITY_COWS)}\n\n"
+    
+    report += "OPTIMIZATION PRIORITIES:\n"
+    report += f"1. Maximize total traits meeting target (Weight: {TRAITS_MET_WEIGHT})\n"
+    for trait, weight in PRIORITY_WEIGHTS.items():
+        direction = "Maximize" if weight > 0 else "Minimize"
+        report += f"2. {direction} {trait} (Weight: {abs(weight)})\n"
+    report += "\n"
+    
+    report += "SUMMARY:\n"
+    report += f"Total cows: {len(all_optimal_pairings)}\n"
+    report += f"Total bulls used: {len(all_bull_counts)}\n"
+    report += f"Average traits meeting target per pairing: {sum(p['Score'] for p in all_optimal_pairings) / len(all_optimal_pairings):.2f}\n\n"
+    
+    # Calculate average values for priority traits
+    priority_avg = {trait: 0 for trait in PRIORITY_WEIGHTS.keys()}
+    priority_count = {trait: 0 for trait in PRIORITY_WEIGHTS.keys()}
+    
+    for pairing in all_optimal_pairings:
+        for trait, value in pairing.get('Priority_Trait_Values', {}).items():
+            priority_avg[trait] += value
+            priority_count[trait] += 1
+    
+    report += "PRIORITY TRAIT AVERAGES:\n"
+    for trait in PRIORITY_WEIGHTS.keys():
+        if priority_count[trait] > 0:
+            avg = priority_avg[trait] / priority_count[trait]
+            report += f"{trait}: {avg:.2f}\n"
+    report += "\n"
+    
+    # Report by batch
+    batch_stats = {}
+    for pairing in all_optimal_pairings:
+        batch = pairing.get('Batch', 'Priority')
+        if batch not in batch_stats:
+            batch_stats[batch] = {
+                'count': 0, 
+                'total_score': 0,
+                'priority_traits': {trait: {'sum': 0, 'count': 0} for trait in PRIORITY_WEIGHTS.keys()}
+            }
+        batch_stats[batch]['count'] += 1
+        batch_stats[batch]['total_score'] += pairing['Score']
+        
+        # Add priority trait values
+        for trait, value in pairing.get('Priority_Trait_Values', {}).items():
+            batch_stats[batch]['priority_traits'][trait]['sum'] += value
+            batch_stats[batch]['priority_traits'][trait]['count'] += 1
+    
+    report += "BATCH STATISTICS:\n"
+    # First show priority batch
+    if 'Priority' in batch_stats:
+        stats = batch_stats['Priority']
+        avg_score = stats['total_score'] / stats['count'] if stats['count'] > 0 else 0
+        report += f"Priority cows: {stats['count']} cows, Avg score: {avg_score:.2f}\n"
+        
+        # Add average priority trait values for this batch
+        for trait, data in stats['priority_traits'].items():
+            if data['count'] > 0:
+                avg = data['sum'] / data['count']
+                report += f"  - Avg {trait}: {avg:.2f}\n"
+    
+    # Then show numbered batches
+    for batch in sorted([b for b in batch_stats.keys() if b != 'Priority']):
+        stats = batch_stats[batch]
+        avg_score = stats['total_score'] / stats['count'] if stats['count'] > 0 else 0
+        report += f"\nBatch {batch}: {stats['count']} cows, Avg score: {avg_score:.2f}\n"
+        
+        # Add average priority trait values for this batch
+        for trait, data in stats['priority_traits'].items():
+            if data['count'] > 0:
+                avg = data['sum'] / data['count']
+                report += f"  - Avg {trait}: {avg:.2f}\n"
+    report += "\n"
+    
+    report += "BULL ASSIGNMENTS:\n"
+    for bull, count in all_bull_counts.items():
+        special_note = " (LIMIT REACHED)" if bull == RESTRICTED_BULL and count >= MAX_MATINGS_FOR_RESTRICTED_BULL else ""
+        report += f"Bull {bull}: {count} cows{special_note}\n"
+    report += "\n"
+    
+    report += "DETAILED PAIRINGS:\n"
+    report += f"{'Batch':<8} {'Cow':<10} {'Bull':<10} {'Score':<5} {'CED':<5} {'Milk':<5} {'Marb':<5} {'ME':<5} {'Traits Meeting Target':<40}\n"
+    report += "-" * 95 + "\n"
+    
+    for pairing in all_optimal_pairings:
+        batch = pairing.get('Batch', 'Priority')
+        batch_str = str(batch)
+        cow = pairing['Cow']
+        bull = pairing['Bull']
+        score = pairing['Score']
+        traits_met = pairing['Traits_Met']
+        
+        # Get priority trait values
+        priority_values = pairing.get('Priority_Trait_Values', {})
+        ced = priority_values.get('CED', 'N/A')
+        milk = priority_values.get('Milk', 'N/A')
+        marb = priority_values.get('Marb', 'N/A')
+        me = priority_values.get('ME', 'N/A')
+        
+        # Format values
+        ced_str = f"{ced:.1f}" if isinstance(ced, (int, float)) else str(ced)
+        milk_str = f"{milk:.1f}" if isinstance(milk, (int, float)) else str(milk)
+        marb_str = f"{marb:.2f}" if isinstance(marb, (int, float)) else str(marb)
+        me_str = f"{me:.1f}" if isinstance(me, (int, float)) else str(me)
+        
+        report += f"{batch_str:<8} {cow:<10} {bull:<10} {score:<5} {ced_str:<5} {milk_str:<5} {marb_str:<5} {me_str:<5} {', '.join(traits_met)[:40]}\n"
+    
+    return report
+
+def create_csv_output(all_optimal_pairings, original_df):
+    """Create a CSV file with all the optimal pairings and their trait values"""
+    # Create a dictionary for the CSV output
+    output_data = []
+    
+    for pairing in all_optimal_pairings:
+        cow = pairing['Cow']
+        bull = pairing['Bull']
+        score = pairing['Score']
+        traits_met = pairing['Traits_Met']
+        batch = pairing.get('Batch', 'Priority')
+        priority_values = pairing.get('Priority_Trait_Values', {})
+        
+        # Get the original row data
+        row_data = original_df[(original_df['Cow'] == cow) & (original_df['Bull'] == bull)]
+        
+        if not row_data.empty:
+            row = row_data.iloc[0]
+            
+            # Create a dictionary for this pairing
+            pairing_dict = {
+                'Batch': batch,
+                'Cow': cow,
+                'Bull': bull,
+                'Score': score,
+                'Traits_Met': ','.join(traits_met)
+            }
+            
+            # Add priority trait values
+            for trait in PRIORITY_WEIGHTS.keys():
+                if trait in priority_values:
+                    pairing_dict[f"{trait}_Value"] = priority_values[trait]
+            
+            # Add all trait values
+            for trait in TRAITS:
+                if trait in row.index:
+                    pairing_dict[trait] = row[trait]
+                    # Add a column indicating if this trait meets the target
+                    if trait in traits_met:
+                        pairing_dict[f"{trait}_Meets_Target"] = "Yes"
+                    else:
+                        pairing_dict[f"{trait}_Meets_Target"] = "No"
+            
+            output_data.append(pairing_dict)
+    
+    # Create the dataframe and save to CSV
+    output_df = pd.DataFrame(output_data)
+    return output_df
+
+def main(file_path):
+    """Main function to run the multi-objective optimization with custom constraints"""
+    print(f"Reading data from {file_path}...")
+    df = parse_breeding_data(file_path)
+    
+    # Check if we have the necessary columns
+    required_cols = ['Cow', 'Bull']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    print(f"Parsed {len(df)} potential pairings involving {len(df['Cow'].unique())} cows and {len(df['Bull'].unique())} bulls.")
+    
+    # Get all unique cows
+    all_cows = list(df['Cow'].unique())
+    total_cows = len(all_cows)
+    
+    # Calculate batch size (1/5 of total cows)
+    batch_size = max(1, total_cows // 5)
+    
+    print(f"Total cows: {total_cows}")
+    print(f"Batch size: {batch_size}")
+    print(f"Will process in {min(5, total_cows)} batches")
+    
+    # Print optimization priorities
+    print("\nOptimization Priorities:")
+    print(f"1. Maximize total traits meeting target (Weight: {TRAITS_MET_WEIGHT})")
+    for trait, weight in PRIORITY_WEIGHTS.items():
+        direction = "Maximize" if weight > 0 else "Minimize"
+        print(f"2. {direction} {trait} (Weight: {abs(weight)})")
+    
+    print("\nSpecial Constraints:")
+    print(f"- Bull {RESTRICTED_BULL} limited to maximum {MAX_MATINGS_FOR_RESTRICTED_BULL} matings")
+    print(f"- Priority cows processed first: {', '.join(PRIORITY_COWS)}")
+    
+    # Store all optimal pairings across batches
+    all_optimal_pairings = []
+    
+    # Track assigned cows
+    assigned_cows = set()
+    
+    # Track bull assignments across all batches
+    all_bull_counts = {}
+    
+    # Track assignments for the restricted bull
+    restricted_bull_count = 0
+    
+    # First, process priority cows in the specified order
+    print("\nProcessing priority cows...")
+    for priority_cow in PRIORITY_COWS:
+        if priority_cow in all_cows:
+            optimal_pairing, restricted_bull_count = optimize_specific_cow(
+                df, priority_cow, restricted_bull_count, all_bull_counts
+            )
+            
+            if optimal_pairing:
+                all_optimal_pairings.append(optimal_pairing)
+                assigned_cows.add(priority_cow)
+                print(f"Successfully assigned priority cow {priority_cow}")
+            else:
+                print(f"Failed to assign priority cow {priority_cow}")
+        else:
+            print(f"Warning: Priority cow {priority_cow} not found in the dataset")
+    
+    # Process remaining cows in batches
+    global current_batch
+    current_batch = 1
+    remaining_cows = [cow for cow in all_cows if cow not in assigned_cows]
+    
+    while remaining_cows and current_batch <= 5:
+        print(f"\nProcessing batch {current_batch}...")
+        
+        # Select cows for this batch
+        batch_cows = remaining_cows[:batch_size]
+        print(f"Selected {len(batch_cows)} cows for this batch")
+        
+        # Optimize this batch
+        batch_optimal_pairings, restricted_bull_count = optimize_breeding_batch(
+            df, batch_cows, restricted_bull_count, all_bull_counts
+        )
+        
+        # Add to overall results
+        all_optimal_pairings.extend(batch_optimal_pairings)
+        
+        # Update assigned cows
+        newly_assigned = {pairing['Cow'] for pairing in batch_optimal_pairings}
+        assigned_cows.update(newly_assigned)
+        
+        # Remove assigned cows from remaining cows
+        remaining_cows = [cow for cow in remaining_cows if cow not in assigned_cows]
+        
+        print(f"Batch {current_batch} complete. Assigned {len(newly_assigned)} cows.")
+        print(f"Total assigned so far: {len(assigned_cows)} of {total_cows} cows")
+        
+        # Move to next batch
+        current_batch += 1
+    
+    print("\nAll batches processed.")
+    
+    # Check if any cows were not assigned
+    unassigned_cows = set(all_cows) - assigned_cows
+    if unassigned_cows:
+        print(f"Warning: {len(unassigned_cows)} cows could not be assigned")
+    
+    print("Generating report...")
+    report = generate_report(all_optimal_pairings, "Optimal", all_bull_counts)
+    
+    # Save report to file
+    text_output_file = "optimal_breeding_report_custom.txt"
+    with open(text_output_file, 'w') as f:
+        f.write(report)
+    
+    # Create and save CSV output
+    csv_output_df = create_csv_output(all_optimal_pairings, df)
+    csv_output_file = "optimal_breeding_results_custom.csv"
+    csv_output_df.to_csv(csv_output_file, index=False)
+    
+    print(f"Text report saved to {text_output_file}")
+    print(f"CSV results saved to {csv_output_file}")
+    print("\nSUMMARY:")
+    print(f"Total optimal pairings: {len(all_optimal_pairings)}")
+    
+    if all_optimal_pairings:
+        print(f"Average traits meeting target: {sum(p['Score'] for p in all_optimal_pairings) / len(all_optimal_pairings):.2f}")
+    
+    return all_optimal_pairings
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+    else:
+        file_path = input("Enter the path to the breeding data file: ")
+
+
+```
+
+```{python}
+
+main('2025cow.csv')
+```

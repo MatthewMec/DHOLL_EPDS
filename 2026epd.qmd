@@ -1,0 +1,280 @@
+```{python}
+#Imports
+import polars as pl
+import matplotlib.pyplot as plt
+import seaborn as sns
+import streamlit as st
+import numpy as np
+import lets_plot as lp
+import pulp
+import math
+from itertools import product
+
+
+def strip_column_names(df: pl.DataFrame) -> pl.DataFrame:
+    return df.rename({col: col.strip() for col in df.columns})
+
+```
+
+```{python}
+president_cow_csv = strip_column_names(pl.read_csv("president_cows.csv"))
+president_heifer_csv = strip_column_names(pl.read_csv("president_heifers.csv"))
+newbulls_heifer_csv = strip_column_names(pl.read_csv("newbull_heifers.csv"))
+read_excel = strip_column_names(pl.read_excel('2026 Planned Mating.xlsx'))
+newbulls_heifer = pl.DataFrame(newbulls_heifer_csv)
+president_cows = pl.DataFrame(president_cow_csv)
+president_heifer = pl.DataFrame(president_heifer_csv)
+
+epd_base = pl.DataFrame(read_excel)
+
+criteria_B = {
+    "PROS": 120,
+    "CED": 15,
+    "Milk": 28,
+    "WW": 73,
+    "YW": 115,
+    "ADG": 0.28,
+    "HPG": 13,
+    "CEM": 8,
+    "Marb": 0.54,
+    "STAY": 17,
+    "CW": 29,
+    "REA": 0.25,
+    "HB": 70,
+    "GM": 61,
+    "BW": -3,
+    "DMI": 0.43,
+    "ME": -1,
+    "YG": 0.01,
+    "FAT": 0
+}
+
+bull_max = {
+    "Z124G": {"max": 8},
+    "8269":  {"max": 8},
+    "D172":  {"max": 20},
+    "1181J": {"max": 20},
+    "1278J": {"max": 26},
+    "4454M": {"max": 26},
+    "J490":  {"max": 25},
+    "n17":  {"max": 25},
+}
+```
+
+
+```{python}
+#Data Cleaning
+higher_cols = ["PROS", "CED", "WW", "YW", "ADG", "Milk", "HPG", "CEM", "STAY", "Marb", "CW", "REA", "HB", "GM"]
+lower_cols = ["BW", "DMI", "ME", "YG", "FAT"]
+epd_clean = pl.concat([president_cows, epd_base])
+heifer_combined = pl.concat([president_heifer, newbulls_heifer])
+
+epd_clean = epd_base.with_columns(
+    cow = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_0"),
+    bull = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_1"),
+    higher_count = pl.sum_horizontal([ (pl.col(col) > criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
+    lower_count = pl.sum_horizontal([ (pl.col(col) < criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
+).drop("AnimalID", "Sex", "BirthDate", "BrdCds", "DOB")
+
+
+heifer_clean = heifer_combined.with_columns(
+    cow = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_0"),
+    bull = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_1"),
+    higher_count = pl.sum_horizontal([ (pl.col(col) > criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
+    lower_count = pl.sum_horizontal([ (pl.col(col) < criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
+).drop("AnimalID", "Sex", "BirthDate", "BrdCds", "DOB")
+
+
+epd_clean = epd_clean.with_columns(
+    combined_count = pl.col("higher_count") + pl.col("lower_count")
+)   
+epd_clean = epd_clean.with_columns(pl.col("bull").str.strip_chars())
+cow_col = "cow"
+bull_col = "bull" 
+score_col = "combined_count"
+```
+
+```{python}
+POWER_FUNCTION = "linear"
+ 
+def apply_power(x: float) -> float:
+    if POWER_FUNCTION == "linear":
+        return x
+    elif POWER_FUNCTION == "squared":
+        return x ** 2
+    elif POWER_FUNCTION == "cubed":
+        return x ** 3
+    elif POWER_FUNCTION == "exponential":
+        return math.exp(x)
+    else:
+        raise ValueError(f"Unknown POWER_FUNCTION: {POWER_FUNCTION}")
+ 
+```
+
+```{python}
+#Optimization Model
+def solve(df: pl.DataFrame, verbose: bool = True) -> dict:
+    """
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Must contain columns cow_col, bull_col, and score_col.
+        Each row is one possible (cow, bull) pairing with its combined_count.
+    verbose : bool
+        Print results to stdout.
+ 
+    Returns
+    -------
+    dict with keys: status, total_score, assignments, bull_usage, unassigned, power_fn
+    """
+ 
+    # Validate required columns
+    for col in (cow_col, bull_col, score_col):
+        if col not in df.columns:
+            raise ValueError(f"Dataframe is missing column: '{col}'")
+ 
+    # Build lookup dict from dataframe
+    combined_count = {
+        (row[cow_col], row[bull_col]): row[score_col]
+        for row in df.select([cow_col, bull_col, score_col]).to_dicts()
+    }
+ 
+    pairs    = list(combined_count.keys())
+    cow_ids  = sorted({c for c, _ in pairs})
+    bull_ids = list(bull_max.keys())
+ 
+    # Pre-compute nonlinear scores as fixed LP coefficients
+    scores = {(c, b): apply_power(combined_count[c, b]) for c, b in pairs}
+ 
+    prob = pulp.LpProblem("Cattle_Pairing", pulp.LpMaximize)
+ 
+    # Binary decision variables
+    x = {(c, b): pulp.LpVariable(f"x_{c}_{b}", cat="Binary") for c, b in pairs}
+ 
+    # Objective: maximize total nonlinear score
+    prob += pulp.lpSum(scores[c, b] * x[c, b] for c, b in pairs), "Total_Score"
+ 
+    # Each cow breeds at most once
+    for c in cow_ids:
+        prob += (
+            pulp.lpSum(x[c, b] for b in bull_ids if (c, b) in x) <= 1,
+            f"cow_once_{c}"
+        )
+ 
+    # Each bull respects its breeding limit
+    for b in bull_ids:
+        prob += (
+            pulp.lpSum(x[c, b] for c in cow_ids if (c, b) in x) <= bull_max[b],
+            f"bull_limit_{b}"
+        )
+ 
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+ 
+    # Extract assignments
+    assignments = [
+        {
+            "cow":            c,
+            "bull":           b,
+            "combined_count": combined_count[c, b],
+            "score":          round(scores[c, b], 4),
+        }
+        for c, b in pairs
+        if pulp.value(x[c, b]) is not None and pulp.value(x[c, b]) > 0.5
+    ]
+ 
+    bull_usage    = {b: sum(1 for a in assignments if a["bull"] == b) for b in bull_ids}
+    assigned_cows = {a["cow"] for a in assignments}
+    unassigned    = [c for c in cow_ids if c not in assigned_cows]
+ 
+    result = {
+        "status":      pulp.LpStatus[prob.status],
+        "total_score": round(pulp.value(prob.objective) or 0, 4),
+        "assignments": sorted(assignments, key=lambda a: -a["score"]),
+        "bull_usage":  bull_usage,
+        "unassigned":  unassigned,
+        "power_fn":    POWER_FUNCTION,
+    }
+ 
+    if verbose:
+        _print_results(result)
+ 
+    return result
+```
+
+
+```{python}
+#Results Analysis
+def _print_results(result: dict) -> None:
+    print("=" * 52)
+    print(f"  CATTLE PAIRING  |  power: {result['power_fn']}")
+    print("=" * 52)
+    print(f"  Status      : {result['status']}")
+    print(f"  Total score : {result['total_score']}")
+    print(f"  Assigned    : {len(result['assignments'])} pairs")
+    if result["unassigned"]:
+        print(f"  Unassigned  : {', '.join(result['unassigned'])}")
+    print()
+ 
+    print(f"  {'Cow':<12} {'Bull':<8} {'Count':>6} {'Score':>8}")
+    print("  " + "-" * 38)
+    for a in result["assignments"]:
+        print(f"  {a['cow']:<12} {a['bull']:<8} {a['combined_count']:>6} {a['score']:>8.2f}")
+ 
+    print()
+    print(f"  {'Bull':<8} {'Used':>5} {'Max':>5} {'Left':>6}")
+    print("  " + "-" * 28)
+    for b, used in result["bull_usage"].items():
+        cap  = result["bull_usage"][b]
+        rem  = cap - used
+        flag = " FULL" if rem == 0 else ""
+        print(f"  {b:<8} {used:>5} {cap:>5} {rem:>6}{flag}")
+    print("=" * 52)
+ 
+ 
+```
+
+```{python}
+
+def export_csv(result: dict, path: str = "cattle_assignments.csv") -> None:
+    """
+    Writes two CSVs:
+        <path>             — one row per cow-bull assignment
+        bull_usage_<path>  — one row per bull showing usage vs limit
+    """
+    pl.DataFrame(result["assignments"]).write_csv(path)
+    print(f"  Assignments written to: {path}")
+ 
+    bull_rows = [
+        {
+            "bull":      b,
+            "used":      used,
+            "max":       result["bull_usage"][b],
+            "remaining": result["bull_usage"][b] - used,
+        }
+        for b, used in result["bull_usage"].items()
+    ]
+    usage_path = "bull_usage_" + path.split("/")[-1]
+    pl.DataFrame(bull_rows).write_csv(usage_path)
+    print(f"  Bull usage written to:  {usage_path}")
+```
+
+```{python}
+print(epd_clean.filter(pl.col("cow").is_duplicated()).sort("cow").head(20))
+```
+
+```{python}
+assignments = pl.read_csv("cattle_assignments.csv")
+assignments_joined = assignments.join(
+    epd_clean,
+    on=["cow", "bull"],
+    how="left"
+)
+```
+
+```{python}
+if __name__ == "__main__":
+    result = solve(epd_clean)
+    export_csv(result)
+```
+
+export_csv(president_score, )
