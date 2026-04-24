@@ -72,6 +72,13 @@ def compute_pair_score(df: pl.DataFrame, use_combined_count:bool=True) -> pl.Dat
     multiplying each by its TRAIT_WEIGHTS value before summing.
     Traits not in TRAIT_WEIGHTS default to weight 1.0.
     Null trait values are treated as 0.
+        if "ME" in df.columns:
+        score_expr = score_expr + (
+            pl.when(pl.col("ME").cast(pl.Float64) > 0)
+            .then(-pl.col("ME").cast(pl.Float64))
+            .otherwise(0.0)
+            )
+
     """
     pct_cols = [c for c in df.columns if c.endswith("_pct")]
     if not pct_cols:
@@ -84,6 +91,9 @@ def compute_pair_score(df: pl.DataFrame, use_combined_count:bool=True) -> pl.Dat
     )
     if use_combined_count and "combined_count" in df.columns:
         score_expr = score_expr + pl.col("combined_count").fill_null(0.0) * COMBINED_COUNT_WEIGHT
+
+
+
     return df.with_columns(score_expr.alias("pair_score"))
 
 
@@ -487,8 +497,8 @@ criteria_B = {
 
 TRAIT_WEIGHTS = { 
     "PROS": 1,
-    "CED": 1.75, #Don't Drop
-    "Milk": 1, 
+    "CED": 1.5, #Don't Drop
+    "Milk": 1.3, 
     "WW": .5, 
     "YW": .5, 
     "ADG": 1,
@@ -567,8 +577,8 @@ newbulls_heifer = pl.concat([ newbulls_heifer])
 heifer_clean = newbulls_heifer.with_columns(
     cow = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_0"),
     bull = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_1"),
-    higher_count = pl.sum_horizontal([ (pl.col(col) > criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
-    lower_count = pl.sum_horizontal([ (pl.col(col) < criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
+    higher_count = pl.sum_horizontal([ (pl.col(col) >= criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
+    lower_count = pl.sum_horizontal([ (pl.col(col) <= criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
 ).drop("AnimalID", "Sex", "BirthDate", "BrdCds", "DOB")
 heifer_clean = heifer_clean.with_columns(
     combined_count = pl.col("higher_count") + pl.col("lower_count")
@@ -578,8 +588,8 @@ heifer_clean = heifer_clean.with_columns(
 president_clean = president_all.with_columns(
     cow = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_0"),
     bull = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_1"),
-    higher_count = pl.sum_horizontal([ (pl.col(col) > criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
-    lower_count = pl.sum_horizontal([ (pl.col(col) < criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
+    higher_count = pl.sum_horizontal([ (pl.col(col) >= criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
+    lower_count = pl.sum_horizontal([ (pl.col(col) <= criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
 ).drop("AnimalID", "Sex", "BirthDate", "BrdCds", "DOB")
 
 president_clean = president_clean.with_columns(
@@ -646,8 +656,8 @@ nbull = pl.concat([nbull, nbull54])
 nbull_clean = nbull.with_columns(
     cow = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_0"),
     bull = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_1"),
-    higher_count = pl.sum_horizontal([ (pl.col(col) > criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
-    lower_count = pl.sum_horizontal([ (pl.col(col) < criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
+    higher_count = pl.sum_horizontal([ (pl.col(col) >= criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
+    lower_count = pl.sum_horizontal([ (pl.col(col) <= criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
 ).drop("AnimalID", "Sex", "BirthDate", "BrdCds", "DOB")
 nbull_clean.with_columns(
     combined_count = pl.col("higher_count") + pl.col("lower_count")
@@ -672,8 +682,8 @@ herd_epd =pl.concat([herd_epd, h33, k20b])
 herd_clean = herd_epd.with_columns(
     cow = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_0"),
     bull = pl.col("AnimalID").str.split_exact("-", 1).struct.field("field_1"),
-    higher_count = pl.sum_horizontal([ (pl.col(col) > criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
-    lower_count = pl.sum_horizontal([ (pl.col(col) < criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
+    higher_count = pl.sum_horizontal([ (pl.col(col) >= criteria_B[col]).cast(pl.UInt8) for col in higher_cols ]).alias("higher_count"),
+    lower_count = pl.sum_horizontal([ (pl.col(col) <= criteria_B[col]).cast(pl.UInt8) for col in lower_cols ]).alias("lower_count")
 ).drop("AnimalID", "Sex", "BirthDate", "BrdCds", "DOB")
 
 herd_clean = herd_clean.with_columns(pl.col("cow").str.strip_chars())
@@ -693,10 +703,11 @@ herd_clean = herd_clean.filter(
 )
 
 herd_clean = herd_clean.unique(subset=["cow", "bull"])
+herd_delete = ["J490", "N17", "H33"]
+herd_clean = herd_clean.filter(~pl.col("bull").is_in(herd_delete)
+)
 
 ```
-
-
 
 ```{python}
 if __name__ == "__main__":
@@ -730,5 +741,5 @@ if __name__ == "__main__":
 
 ```{python}
 herd_assignments = pl.DataFrame(herd_result["assignments"])
-
+herd_assignments = herd_assignments.join(herd_clean, on=["cow", "bull"], how="left")
 ```
