@@ -140,12 +140,15 @@ def normalize_pct_diff(df: pl.DataFrame) -> pl.DataFrame:
     pct_cols = [c for c in df.columns if c.endswith("_pct")]
     exprs = []
     for col in pct_cols:
-        rms = (df[col].fill_null(0.0) ** 2).mean() ** 0.5
+        mean_sq = (df[col].fill_null(0.0) ** 2).mean()
+        rms = mean_sq ** 0.5 if (mean_sq is not None and mean_sq > 0) else None
         if rms is None or rms == 0:
             exprs.append(pl.col(col))
         else:
             exprs.append((pl.col(col) / rms).alias(col))
     return df.with_columns(exprs)
+ 
+
 
 
 def compute_pair_score(df: pl.DataFrame, trait_weights: dict, cc_weight: float) -> pl.DataFrame:
