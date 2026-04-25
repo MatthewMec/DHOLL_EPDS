@@ -1,0 +1,8 @@
+streamlit
+polars
+pulp
+matplotlib
+numpy
+openpyxl
+xlrd
+ 

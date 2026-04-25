@@ -505,7 +505,7 @@ with tabs[2]:
     else:
         # Preview
         with st.expander("🔍 Preview uploaded data"):
-            st.dataframe(st.session_state.epd_df.to_pandas(), use_container_width=True)
+            st.dataframe(st.session_state.epd_df.to_pandas(), width=True)
 
         # Active caps summary
         active_caps = {b: cap for b, cap in st.session_state.bull_caps.items() if cap > 0}
@@ -518,7 +518,7 @@ with tabs[2]:
         if not active_caps:
             st.error("All bull caps are set to 0 — nothing to solve.")
         else:
-            if st.button("▶ Run Optimization", type="primary", use_container_width=True):
+            if st.button("▶ Run Optimization", type="primary", width=True):
                 with st.spinner("Cleaning data, scoring pairs, solving…"):
                     try:
                         # Clean
@@ -586,7 +586,7 @@ with tabs[3]:
         # ── Assignments table ────────────────────────────────────────────────
         st.subheader("📋 Assignments")
         assignments_df = pd.DataFrame(result["assignments"])
-        st.dataframe(assignments_df, use_container_width=True, hide_index=True)
+        st.dataframe(assignments_df, width=True, hide_index=True)
 
         # Download assignments
         csv_bytes = assignments_df.to_csv(index=False).encode()
@@ -619,10 +619,10 @@ with tabs[3]:
         ax.set_title("Bull Usage vs Capacity")
         ax.legend()
         ax.spines[["top","right"]].set_visible(False)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width=True)
 
         # Usage table
-        st.dataframe(usage_df, use_container_width=True, hide_index=True)
+        st.dataframe(usage_df, width=True, hide_index=True)
 
         usage_csv = usage_df.to_csv(index=False).encode()
         st.download_button(
@@ -643,4 +643,4 @@ with tabs[3]:
             ax2.set_ylabel("Count")
             ax2.set_title("Distribution of Assigned Pair Scores")
             ax2.spines[["top","right"]].set_visible(False)
-            st.pyplot(fig2, use_container_width=True)
+            st.pyplot(fig2, width=True)
