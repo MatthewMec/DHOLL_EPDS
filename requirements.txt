@@ -5,4 +5,4 @@ matplotlib
 numpy
 openpyxl
 xlrd
- 
+fastexcel
